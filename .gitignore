@@ -1,0 +1,7 @@
+node_modules/
+.env
+src/artifacts/
+src/config/deployed.json
+cache/
+coverage/
+coverage.json
