@@ -322,8 +322,13 @@ router.get("/certificate-requests", async (req, res) => {
     const [requests, total] = await Promise.all([
       CertificateRequest.find(filter)
         .sort({ createdAt: -1 })
-        .skip((page - 1) * limit)
+        .skip((Number(page) - 1) * Number(limit))
         .limit(Number(limit))
+        .populate(
+          "student",
+          "name registerNumber course yearOfCompletion cgpa totalCredits " +
+          "hasBacklogs resultsPublished degreeEligible subjects documents email mobile"
+        )
         .lean(),
       CertificateRequest.countDocuments(filter),
     ]);
