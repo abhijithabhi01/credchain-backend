@@ -188,7 +188,54 @@ router.post("/request-certificate", protectStudent, async (req, res) => {
       });
     }
 
-    const { mobile, email, address, pincode, certificateType } = req.body;
+    const { mobile, email, address, pincode, certificateType, documents } = req.body;
+
+    // ── Persist real student documents (overwrites mock/seed placeholders) ────
+    // The DB may contain tiny SVG placeholders from seeding.
+    // We replace each matching type individually so that any already-verified
+    // doc keeps its verified flag, while unverified ones get fresh data.
+    if (Array.isArray(documents) && documents.length > 0) {
+      const validDocs = documents.filter(
+        (d) => d && d.type && d.dataUri && d.label
+      );
+
+      if (validDocs.length > 0) {
+        // Fetch current docs so we can preserve the verified flag per slot
+        const freshStudent = await Student.findById(student._id).select("documents").lean();
+        const existingMap  = {};
+        for (const d of (freshStudent?.documents ?? [])) existingMap[d.type] = d;
+
+        const docsToStore = validDocs.map((d) => ({
+          type:       d.type,
+          label:      d.label,
+          dataUri:    d.dataUri,
+          mimeType:   d.mimeType || "image/jpeg",
+          uploadedAt: new Date(),
+          // Keep verified=true only if the SAME type was already verified;
+          // a fresh upload resets verification for that slot.
+          verified:   false,
+        }));
+
+        // Merge: keep any existing doc types that were NOT re-uploaded
+        const reUploadedTypes = new Set(docsToStore.map((d) => d.type));
+        const keptDocs = Object.values(existingMap).filter(
+          (d) => !reUploadedTypes.has(d.type)
+        );
+
+        const mergedDocs = [...keptDocs, ...docsToStore];
+
+        await Student.findByIdAndUpdate(
+          student._id,
+          { $set: { documents: mergedDocs } },
+          { runValidators: true }
+        );
+
+        console.log(
+          `[student/request-certificate] Updated ${docsToStore.length} document(s) for ${student.registerNumber}` +
+          ` (kept ${keptDocs.length} unchanged slot(s))`
+        );
+      }
+    }
 
     // Basic validation
     const missing = ["mobile", "email", "address", "pincode", "certificateType"].filter(
