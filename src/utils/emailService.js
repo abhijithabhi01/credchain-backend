@@ -186,12 +186,12 @@ const tplIssued = ({
       <p style="margin:0 0 18px;font-size:13px;color:rgba(255,255,255,0.45);line-height:1.6">
         Creates your CredChain account automatically.<br>No password needed — one click.
       </p>
-      <a href="${claimUrl}" class="btn" style="font-size:15px;padding:14px 40px;">
+      <a href=${BASE_URL} class="btn" style="font-size:15px;padding:14px 40px;">
         Claim Certificate &rarr;
       </a>
       <p class="fallback-url">
         Button not working? Paste this URL in your browser:<br>
-        <a href="${claimUrl}" style="color:rgba(168,85,247,0.8)">${claimUrl}</a>
+        <a href="${BASE_URL} style="color:rgba(168,85,247,0.8)">${claimUrl}</a>
       </p>
       <p style="font-size:11px;color:rgba(255,255,255,0.18);margin:14px 0 0;">
         Link expires in 24 hours &bull; single use only

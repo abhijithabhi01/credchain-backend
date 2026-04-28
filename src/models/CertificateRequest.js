@@ -2,11 +2,7 @@ const mongoose = require("mongoose");
 const { v4: uuidv4 } = require("uuid");
 
 const CERTIFICATE_TYPES = [
-  "Degree Certificate",
-  "Provisional Certificate",
-  "Transcript",
-  "Migration Certificate",
-  "Character Certificate",
+  "MCA Degree Certificate"
 ];
 
 const certificateRequestSchema = new mongoose.Schema(

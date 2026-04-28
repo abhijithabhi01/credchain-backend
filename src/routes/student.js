@@ -249,7 +249,7 @@ router.post("/request-certificate", protectStudent, async (req, res) => {
     }
 
     const ALLOWED_TYPES = [
-      "Degree Certificate",
+      "MCA Degree Certificate",
       "Provisional Certificate",
       "Transcript",
       "Migration Certificate",
@@ -276,7 +276,7 @@ router.post("/request-certificate", protectStudent, async (req, res) => {
 
     // ── Blockchain: write Degree Certificates immediately ────────────────
     let blockchainInfo = null;
-    if (certificateType === "Degree Certificate") {
+    if (certificateType === "MCA Degree Certificate") {
       try {
         const { v4: uuidv4 } = require("uuid");
         const blockchainCertId = `CERT-${uuidv4().toUpperCase()}`;
