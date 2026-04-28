@@ -17,6 +17,8 @@ const {
   sendRevocationNotice,
 } = require("../utils/emailService");
 
+// ── Multer: optional PDF (used only on approve) ──────────────────────────────
+// We make the file optional here; the route handler enforces it when status=approved.
 const upload = multer({
   storage: multer.memoryStorage(),
   limits:  { fileSize: 10 * 1024 * 1024 },
@@ -30,7 +32,6 @@ router.use(protect, authorize("issuer"));
 
 /**
  * Write to blockchain with graceful fallback when BLOCKCHAIN_OPTIONAL=true.
- * This fixes the "sender doesn't have enough funds" crash in local dev.
  */
 const writeToBlockchain = async (certId, ipfsHash, studentRef, courseName, year) => {
   const optional = process.env.BLOCKCHAIN_OPTIONAL === "true";
@@ -72,6 +73,8 @@ const revokeOnBlockchain = async (certId) => {
   }
 };
 
+// ── Stats ────────────────────────────────────────────────────────────────────
+
 router.get("/stats", async (req, res) => {
   try {
     const [totalIssued, pending, revoked] = await Promise.all([
@@ -84,6 +87,8 @@ router.get("/stats", async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 });
+
+// ── Upload only (kept for standalone use) ────────────────────────────────────
 
 router.post("/upload", upload.single("certificate"), async (req, res) => {
   try {
@@ -108,6 +113,8 @@ router.post("/upload", upload.single("certificate"), async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 });
+
+// ── Issue only (kept for standalone use) ────────────────────────────────────
 
 router.post("/issue", async (req, res) => {
   try {
@@ -151,14 +158,12 @@ router.post("/issue", async (req, res) => {
       status:           "issued",
     });
 
-    // Generate claim token (24h magic link for student)
     const claimToken = await ClaimToken.create({
       certId,
       studentEmail: studentEmail.toLowerCase(),
       studentName:  studentName || student?.name || "Unknown",
     });
 
-    // Send email — non-blocking, never crashes the request
     sendCertificateIssued({
       to:               studentEmail,
       studentName:      studentName || student?.name || "Student",
@@ -181,7 +186,7 @@ router.post("/issue", async (req, res) => {
       success: true, certificate, txHash,
       blockchainMock: mock,
       message: mock
-        ? "Certificate saved. Blockchain skipped (BLOCKCHAIN_OPTIONAL mode — fund wallet or deploy to testnet for real chain writes)."
+        ? "Certificate saved. Blockchain skipped (BLOCKCHAIN_OPTIONAL mode)."
         : "Certificate issued on blockchain and saved.",
     });
   } catch (error) {
@@ -204,6 +209,8 @@ router.post("/issue", async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 });
+
+// ── List certificates ────────────────────────────────────────────────────────
 
 router.get("/certificates", async (req, res) => {
   try {
@@ -234,6 +241,8 @@ router.get("/certificates", async (req, res) => {
   }
 });
 
+// ── Revoke ───────────────────────────────────────────────────────────────────
+
 router.post("/revoke/:certId", async (req, res) => {
   try {
     const { certId } = req.params;
@@ -254,7 +263,6 @@ router.post("/revoke/:certId", async (req, res) => {
     certificate.revokeReason = reason || "Revoked by issuer";
     await certificate.save();
 
-    // Notify student
     sendRevocationNotice({
       to:          certificate.studentEmail,
       studentName: certificate.studentName,
@@ -278,7 +286,8 @@ router.post("/revoke/:certId", async (req, res) => {
   }
 });
 
-// POST /api/issuer/resend-claim/:certId
+// ── Resend claim link ────────────────────────────────────────────────────────
+
 router.post("/resend-claim/:certId", async (req, res) => {
   try {
     const { certId }  = req.params;
@@ -312,7 +321,7 @@ router.post("/resend-claim/:certId", async (req, res) => {
 
 // ── Certificate Request Management ──────────────────────────────────────────
 
-// GET /api/issuer/certificate-requests — list all student certificate requests
+// GET /api/issuer/certificate-requests
 router.get("/certificate-requests", async (req, res) => {
   try {
     const { status, page = 1, limit = 20 } = req.query;
@@ -339,7 +348,7 @@ router.get("/certificate-requests", async (req, res) => {
   }
 });
 
-// GET /api/issuer/certificate-requests/stats — counts per status
+// GET /api/issuer/certificate-requests/stats
 router.get("/certificate-requests/stats", async (req, res) => {
   try {
     const [pending, processing, approved, rejected, dispatched] = await Promise.all([
@@ -356,37 +365,204 @@ router.get("/certificate-requests/stats", async (req, res) => {
   }
 });
 
-// PATCH /api/issuer/certificate-requests/:id/status — approve / reject / dispatch
-router.patch("/certificate-requests/:id/status", async (req, res) => {
-  try {
-    const { status, rejectionReason } = req.body;
-    const ALLOWED = ["processing", "approved", "rejected", "dispatched"];
-    if (!ALLOWED.includes(status)) {
-      return res.status(400).json({ success: false,
-        message: `Invalid status. Allowed: ${ALLOWED.join(", ")}` });
+/**
+ * PATCH /api/issuer/certificate-requests/:id/status
+ *
+ * For status = "approved":
+ *   • Requires a PDF file upload (field name: "certificate")
+ *   • Uploads PDF to IPFS via Pinata
+ *   • Issues the certificate on the blockchain
+ *   • Creates a Certificate document + ClaimToken
+ *   • Updates the CertificateRequest with blockchain refs
+ *   • Sends the certificate-issued email with claim link to the student
+ *
+ * For status = "rejected" | "processing" | "dispatched":
+ *   • Works the same as before (no file required)
+ *
+ * Content-Type must be multipart/form-data when approving.
+ * Send `status` as a form field alongside the file.
+ */
+router.patch(
+  "/certificate-requests/:id/status",
+  upload.single("certificate"),   // optional; enforced below when status=approved
+  async (req, res) => {
+    try {
+      const { status, rejectionReason } = req.body;
+      const ALLOWED = ["processing", "approved", "rejected", "dispatched"];
+
+      if (!ALLOWED.includes(status)) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid status. Allowed: ${ALLOWED.join(", ")}`,
+        });
+      }
+
+      // ── Fetch request + populate student ──────────────────────────────────
+      const certReq = await CertificateRequest.findById(req.params.id).populate(
+        "student",
+        "name email mobile course yearOfCompletion cgpa grade"
+      );
+      if (!certReq) {
+        return res.status(404).json({ success: false, message: "Request not found." });
+      }
+
+      // ── APPROVE: full pipeline ─────────────────────────────────────────────
+      if (status === "approved") {
+        if (!req.file) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "A PDF certificate file is required when approving a request. " +
+              "Send it as multipart/form-data with field name 'certificate'.",
+          });
+        }
+
+        const student = certReq.student;   // populated above
+
+        // Derive student details — fall back to request-level fields
+        const studentName      = student?.name        || "Unknown";
+        const studentEmail     = certReq.email;        // always present on the request
+        const courseName       = certReq.certificateType;
+        const yearOfCompletion = student?.yearOfCompletion || new Date().getFullYear();
+        const grade            = student?.grade        || undefined;
+        const cgpa             = student?.cgpa         || undefined;
+
+        // 1. Upload PDF to IPFS
+        const certId   = uuidv4();
+        const fileName = `cert-${certId}.pdf`;
+        let ipfsHash, ipfsUrl;
+
+        try {
+          ({ ipfsHash, ipfsUrl } = await uploadFileToPinata(req.file.buffer, fileName, certId));
+        } catch (pinataErr) {
+          return res.status(502).json({
+            success: false,
+            message: `IPFS upload failed: ${pinataErr.message}`,
+          });
+        }
+
+        // 2. Issue on blockchain
+        let txHash, blockNumber, issuerAddress, blockchainMock;
+        try {
+          ({ txHash, blockNumber, issuerAddress, mock: blockchainMock } =
+            await writeToBlockchain(
+              certId,
+              ipfsHash,
+              student ? student._id.toString() : studentEmail,
+              courseName,
+              yearOfCompletion
+            ));
+        } catch (chainErr) {
+          const msg = chainErr.reason || chainErr.message || "Blockchain error";
+          return res.status(500).json({ success: false, message: `Blockchain error: ${msg}` });
+        }
+
+        // 3. Persist Certificate document
+        const certificate = await Certificate.create({
+          certId,
+          ipfsHash,
+          ipfsUrl:          ipfsUrl || `https://gateway.pinata.cloud/ipfs/${ipfsHash}`,
+          studentId:        student?._id,
+          studentName,
+          studentEmail:     studentEmail.toLowerCase(),
+          courseName,
+          yearOfCompletion: parseInt(yearOfCompletion),
+          grade,
+          cgpa:             cgpa ? parseFloat(cgpa) : undefined,
+          txHash,
+          blockNumber,
+          issuedByAddress:  issuerAddress,
+          issuedBy:         req.user._id,
+          status:           "issued",
+        });
+
+        // 4. Create claim token (magic link for student)
+        const claimToken = await ClaimToken.create({
+          certId,
+          studentEmail: studentEmail.toLowerCase(),
+          studentName,
+        });
+
+        // 5. Update the certificate request record
+        certReq.status           = "approved";
+        certReq.txHash           = txHash;
+        certReq.blockNumber      = blockNumber;
+        certReq.ipfsHash         = ipfsHash;
+        certReq.blockchainCertId = certId;
+        await certReq.save();
+
+        // 6. Send email — non-blocking
+        sendCertificateIssued({
+          to:               studentEmail,
+          studentName,
+          courseName,
+          yearOfCompletion: parseInt(yearOfCompletion),
+          grade,
+          certId,
+          ipfsUrl:          certificate.ipfsUrl,
+          claimToken:       claimToken.token,
+          pdfBuffer:        req.file.buffer,   // attach PDF to email
+        }).catch(err => console.error("[Email] sendCertificateIssued:", err.message));
+
+        // 7. Audit log
+        await log({
+          action: "REQUEST_APPROVED",
+          performedBy: req.user._id,
+          performedByRole: "issuer",
+          targetCertId: certId,
+          targetUserId: student?._id,
+          details: {
+            requestId: certReq.requestId,
+            certificateType: certReq.certificateType,
+            txHash,
+            blockNumber,
+            ipfsHash,
+            blockchainMock,
+          },
+          req,
+        });
+
+        return res.json({
+          success: true,
+          message: blockchainMock
+            ? "Request approved. Certificate uploaded to IPFS, saved (blockchain skipped — BLOCKCHAIN_OPTIONAL mode), and email sent."
+            : "Request approved. Certificate issued on blockchain, uploaded to IPFS, and email sent to student.",
+          request:        certReq,
+          certificate,
+          txHash,
+          blockchainMock,
+        });
+      }
+
+      // ── ALL OTHER STATUSES (processing / rejected / dispatched) ───────────
+      certReq.status = status;
+      if (status === "rejected" && rejectionReason) {
+        certReq.rejectionReason = rejectionReason;
+      }
+      await certReq.save();
+
+      await log({
+        action: `REQUEST_${status.toUpperCase()}`,
+        performedBy: req.user._id,
+        performedByRole: "issuer",
+        details: {
+          requestId: certReq.requestId,
+          certificateType: certReq.certificateType,
+          status,
+          rejectionReason,
+        },
+        req,
+      });
+
+      return res.json({ success: true, message: `Request ${status}.`, request: certReq });
+
+    } catch (error) {
+      if (error.reason) {
+        return res.status(400).json({ success: false, message: `Blockchain error: ${error.reason}` });
+      }
+      res.status(500).json({ success: false, message: error.message });
     }
-
-    const certReq = await CertificateRequest.findById(req.params.id);
-    if (!certReq) return res.status(404).json({ success: false, message: "Request not found." });
-
-    certReq.status = status;
-    if (status === "rejected" && rejectionReason) {
-      certReq.rejectionReason = rejectionReason;
-    }
-    await certReq.save();
-
-    await log({
-      action: `REQUEST_${status.toUpperCase()}`,
-      performedBy: req.user._id,
-      performedByRole: "issuer",
-      details: { requestId: certReq.requestId, certificateType: certReq.certificateType, status, rejectionReason },
-      req,
-    });
-
-    res.json({ success: true, message: `Request ${status}.`, request: certReq });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
   }
-});
+);
 
 module.exports = router;
